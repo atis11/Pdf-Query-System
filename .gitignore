@@ -1,0 +1,15 @@
+# Ignore Python cache
+__pycache__/
+*.pyc
+
+# Ignore virtual environments
+venv/
+
+# Ignore environment variables
+.env
+
+# Ignore logs
+*.log
+
+# Ignore index database
+index_store/

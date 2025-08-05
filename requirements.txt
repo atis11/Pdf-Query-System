@@ -1,0 +1,28 @@
+# === PDF Parsing ===
+PyMuPDF==1.23.24               # PDF text extraction
+pdfminer.six==20221105         # (optional) alternative PDF parsing
+
+# === OCR (for scanned PDFs) ===
+easyocr==1.7.1
+opencv-python-headless==4.9.0.80
+torch==2.2.2                   # Match with system/GPU
+
+# === LLM + Embedding + Indexing ===
+langchain==0.2.0               # Core LangChain framework
+langchain-groq==0.1.0          # Groq LLM integration
+langchain-community==0.2.0     # Community integrations
+sentence-transformers==2.2.2   # For HuggingFace embeddings
+openai==1.30.1                 # OpenAI integration
+groq==0.5.0                    # Groq LLM provider
+
+# === Vector Store ===
+chromadb==0.4.24               # Vector database for LangChain
+faiss-cpu==1.7.4               # Optional: for better performance
+
+# === UI (Streamlit) ===
+streamlit==1.35.0
+
+# === Env & Utils ===
+python-dotenv==1.0.1
+tqdm==4.66.4
+pydantic==2.7.3
