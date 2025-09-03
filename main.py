@@ -110,12 +110,24 @@ def main():
             continue
 
         question_start = time.time()
-        answer = ask_question(qa_chain, question, chat_history)
+        answer, sources = ask_question(qa_chain, question, chat_history)
         question_time = time.time() - question_start
         question_count += 1
         
         logger.info(f"Question {question_count} processed in {question_time:.2f} seconds")
         print(f"\nAnswer:\n{answer}\n")
+        if sources:
+            print("Retrieved chunks:")
+            for i, src in enumerate(sources, start=1):
+                filename = src.get("filename") or "Unknown file"
+                page = src.get("page_num")
+                header = f"{i}. {filename}"
+                if page is not None:
+                    header += f" — Page {page}"
+                print(header)
+                print("-" * 80)
+                print(src.get("text") or "")
+                print("\n")
 
     total_time = time.time() - start_time
     logger.info(f"Total application runtime: {total_time:.2f} seconds")

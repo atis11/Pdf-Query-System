@@ -1,11 +1,15 @@
 import os
 import logging
 import time
+import json
 from langchain_community.vectorstores import Chroma
 from langchain_groq import ChatGroq
 from langchain.chains import ConversationalRetrievalChain
 from langchain_community.embeddings import HuggingFaceEmbeddings
 from langchain.prompts import PromptTemplate
+from langchain_community.retrievers import BM25Retriever
+from langchain.retrievers import EnsembleRetriever
+from langchain.schema import Document
 from dotenv import load_dotenv
 
 # Configure logging
@@ -54,23 +58,27 @@ PROMPT = PromptTemplate(
     input_variables=["context", "question"]
 )
 
-# Configure LLM from Groq
-if groq_key:
-    llm = ChatGroq(
-        model_name="llama3-70b-8192",  # Updated to Llama3-70b-8192 model
-        api_key=groq_key,
-        temperature=0.6,
-        max_tokens=1024
-    )
-else:
-    logger.warning("GROQ_API_KEY not found in environment variables.")
-    logger.warning("Please create a .env file with your GROQ_API_KEY")
-    logger.warning("The application will continue but LLM features will be limited.")
-    llm = None
+# Configure LLM from Groq (will be updated with temperature parameter)
+def create_llm(temperature: float = 0.6):
+    if groq_key:
+        return ChatGroq(
+            model_name="llama3-70b-8192",  # Updated to Llama3-70b-8192 model
+            api_key=groq_key,
+            temperature=temperature,
+            max_tokens=1024
+        )
+    else:
+        logger.warning("GROQ_API_KEY not found in environment variables.")
+        logger.warning("Please create a .env file with your GROQ_API_KEY")
+        logger.warning("The application will continue but LLM features will be limited.")
+        return None
 
-def load_query_engine(index_path: str = "index_store") -> ConversationalRetrievalChain:
+def load_query_engine(index_path: str = "index_store", top_k: int = 5, 
+                     dense_weight: float = 0.5, temperature: float = 0.6) -> ConversationalRetrievalChain:
     """Load saved index and prepare a Groq-powered QueryEngine with conversation support."""
     start_time = time.time()
+    
+    logger.info(f"Loading query engine with top_k={top_k}, dense_weight={dense_weight}, temperature={temperature}")
     
     logger.info("Loading embedding model...")
     embed_start = time.time()
@@ -88,14 +96,55 @@ def load_query_engine(index_path: str = "index_store") -> ConversationalRetrieva
     vector_time = time.time() - vector_start
     logger.info(f"Vector store loaded in {vector_time:.2f} seconds")
     
-    logger.info("Loading index from storage...")
+    # Prepare hybrid retrievers: Dense (Chroma) + Sparse (BM25)
+    logger.info("Preparing hybrid retrievers (Chroma + BM25)...")
     index_start = time.time()
+
+    dense_retriever = vectorstore.as_retriever(search_kwargs={"k": top_k})
+
+    # Attempt to build BM25 retriever from persisted corpus
+    bm25_retriever = None
+    corpus_path = os.path.join(index_path, "bm25_corpus.jsonl")
+    if os.path.exists(corpus_path):
+        try:
+            load_corpus_start = time.time()
+            docs: list[Document] = []
+            with open(corpus_path, "r", encoding="utf-8") as f:
+                for line in f:
+                    obj = json.loads(line)
+                    text = obj.get("text", "")
+                    metadata = obj.get("metadata", {})
+                    docs.append(Document(page_content=text, metadata=metadata))
+            bm25_retriever = BM25Retriever.from_documents(docs)
+            bm25_retriever.k = top_k
+            load_corpus_time = time.time() - load_corpus_start
+            logger.info(f"BM25 corpus loaded with {len(docs)} docs in {load_corpus_time:.2f} seconds")
+        except Exception as e:
+            logger.exception(f"Failed to load BM25 corpus; falling back to dense-only: {e}")
+            bm25_retriever = None
+    else:
+        logger.warning("BM25 corpus not found; run indexing to enable hybrid search. Using dense-only retriever.")
+
+    # Create ensemble retriever with configurable weights
+    if bm25_retriever is not None:
+        sparse_weight = 1.0 - dense_weight
+        retriever = EnsembleRetriever(
+            retrievers=[dense_retriever, bm25_retriever],
+            weights=[dense_weight, sparse_weight]
+        )
+        logger.info(f"Hybrid retriever enabled (Chroma + BM25) with weights: dense={dense_weight:.1f}, sparse={sparse_weight:.1f}")
+    else:
+        retriever = dense_retriever
+        logger.info("Using dense retriever only (Chroma)")
+
+    # Create LLM with configurable temperature
+    llm = create_llm(temperature=temperature)
     
     if llm:
         # Use ConversationalRetrievalChain for conversation history support
         qa_chain = ConversationalRetrievalChain.from_llm(
             llm=llm,
-            retriever=vectorstore.as_retriever(search_kwargs={"k": 5}),
+            retriever=retriever,
             return_source_documents=True,
             combine_docs_chain_kwargs={"prompt": PROMPT}
         )
@@ -105,7 +154,7 @@ def load_query_engine(index_path: str = "index_store") -> ConversationalRetrieva
         qa_chain = RetrievalQA.from_chain_type(
             llm=None,
             chain_type="stuff",
-            retriever=vectorstore.as_retriever(search_kwargs={"k": 5}),
+            retriever=retriever,
             return_source_documents=True,
             chain_type_kwargs={"prompt": PROMPT}
         )
@@ -119,8 +168,12 @@ def load_query_engine(index_path: str = "index_store") -> ConversationalRetrieva
     return qa_chain
 
 
-def ask_question(qa_chain, question: str, chat_history: list = None) -> str:
-    """Ask a natural language question to the PDF knowledge base."""
+def ask_question(qa_chain, question: str, chat_history: list = None):
+    """Ask a question and return the answer plus retrieved chunks.
+
+    Returns a tuple: (answer: str, sources: List[Dict[str, Any]])
+    where each source has keys: text, filename, page_num.
+    """
 
     if chat_history is None:
         chat_history = []
@@ -140,16 +193,22 @@ def ask_question(qa_chain, question: str, chat_history: list = None) -> str:
     logger.info(f"Generated answer: {response['answer'][:100]}...")
     logger.info(f"Question processing time: {processing_time:.2f} seconds")
 
+    sources = []
     if 'source_documents' in response:
         logger.info("Source documents found:")
         for doc in response['source_documents']:
             meta = doc.metadata
             logger.info(f"- {meta.get('filename')} | Page {meta.get('page_num')}")
+            sources.append({
+                "text": getattr(doc, 'page_content', ''),
+                "filename": meta.get('filename'),
+                "page_num": meta.get('page_num')
+            })
 
     total_time = time.time() - start_time
     logger.info(f"Total question time: {total_time:.2f} seconds")
     
-    return response['answer']
+    return response['answer'], sources
 
 def get_specialized_prompt(question_type: str = "general") -> PromptTemplate:
     """Get specialized prompt template based on question type."""
